@@ -188,7 +188,8 @@ public final class TinkerDexOptimizer {
                                         ShareTinkerLog.printErrStackTrace(TAG, thr,
                                                 "Fail to call triggerPMDexOptAsyncOnDemand.");
                                     } finally {
-                                        if (!useEmergencyMode) {
+                                        //事务码策略不可用的 ROM 上 vdex 同样生成不了，跳过最长 63s 的空等
+                                        if (!useEmergencyMode && queryPerformDexOptSecondaryTransactionCode() >= 0) {
                                             final String vdexPath = optimizedPath.substring(0,
                                                     optimizedPath.lastIndexOf(ODEX_SUFFIX)) + VDEX_SUFFIX;
                                             waitUntilFileGeneratedOrTimeout(context, vdexPath);
@@ -271,7 +272,10 @@ public final class TinkerDexOptimizer {
         }
 
         final File dexFile = new File(dexPath);
-        for (int i = 0; i < 10; ++i) {
+        //事务码策略不可用的 ROM（移除了 TRANSACTION_performDexOptSecondary 字段的系统）
+        //上 odex 大概率生成不了，减少无谓的重试与等待，shell 策略仍有机会生效
+        final int maxRounds = queryPerformDexOptSecondaryTransactionCode() < 0 ? 2 : 10;
+        for (int i = 0; i < maxRounds; ++i) {
             if (triggerSecondaryDexOpt(context, dexFile, oatFile, true)) {
                 return;
             }
@@ -294,7 +298,10 @@ public final class TinkerDexOptimizer {
                     throw new IllegalStateException("No odex file was generated after calling registerDexModule");
                 }
             } else {
-                throw new IllegalStateException("No odex file was generated after calling performDexOptSecondary");
+                //odex 缺失不影响补丁功能，补丁 dex 会以 JIT 方式运行，系统后台仍可能稍后完成 dexopt，
+                //降级为警告而不是抛异常（调用方会把异常当失败打印完整堆栈，噪音很大）
+                ShareTinkerLog.w(TAG, "[-] No odex file was generated after calling performDexOptSecondary," +
+                        " patch dex will run in JIT mode.");
             }
         }
     }
@@ -358,7 +365,11 @@ public final class TinkerDexOptimizer {
 
     private static final int[] sPerformDexOptSecondaryTransactionCode = {-1};
 
-    private static void performDexOptSecondaryByTransactionCode(Context context) throws IllegalStateException {
+    /**
+     * 查询 performDexOptSecondary 的 binder 事务码并缓存。
+     * 返回负数表示该 ROM 不支持（Android 14+ 及部分定制系统已移除该字段），调用方应跳过此策略。
+     */
+    private static int queryPerformDexOptSecondaryTransactionCode() {
         synchronized (sPerformDexOptSecondaryTransactionCode) {
             if (sPerformDexOptSecondaryTransactionCode[0] == -1) {
                 try {
@@ -372,9 +383,19 @@ public final class TinkerDexOptimizer {
                     cstField.setAccessible(true);
                     sPerformDexOptSecondaryTransactionCode[0] = (int) cstField.get(null);
                 } catch (Throwable thr) {
-                    throw new IllegalStateException("Cannot query transaction code of performDexOptSecondary.", thr);
+                    //标记为不支持（-2），只警告一次，后续轮次静默跳过，不再打印异常堆栈
+                    sPerformDexOptSecondaryTransactionCode[0] = -2;
+                    ShareTinkerLog.w(TAG, "[-] TRANSACTION_performDexOptSecondary is unavailable" +
+                            " on this ROM, skip performDexOptSecondaryByTransactionCode strategy.");
                 }
             }
+            return sPerformDexOptSecondaryTransactionCode[0];
+        }
+    }
+
+    private static void performDexOptSecondaryByTransactionCode(Context context) throws IllegalStateException {
+        if (queryPerformDexOptSecondaryTransactionCode() < 0) {
+            return;
         }
 
         ShareTinkerLog.i(TAG, "[+] performDexOptSecondaryByTransactionCode, code: %s",

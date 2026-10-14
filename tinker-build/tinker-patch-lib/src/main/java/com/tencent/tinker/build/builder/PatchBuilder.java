@@ -20,17 +20,12 @@ package com.tencent.tinker.build.builder;
 import com.tencent.tinker.build.patch.Configuration;
 import com.tencent.tinker.build.util.FileOperation;
 import com.tencent.tinker.build.util.Logger;
+import com.tencent.tinker.build.util.RsaSignUtil;
 import com.tencent.tinker.build.util.TypedValue;
-import com.tencent.tinker.commons.util.IOHelper;
 
-import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.security.Key;
-import java.security.KeyStore;
-import java.util.ArrayList;
+import java.security.PrivateKey;
 
 /**
  * @author zhangshaowen
@@ -86,71 +81,23 @@ public class PatchBuilder {
 
     }
 
-    private String getSignatureAlgorithm() throws Exception {
-        InputStream is = null;
-        try {
-            is = new BufferedInputStream(new FileInputStream(config.mSignatureFile));
-            KeyStore keyStore = KeyStore.getInstance("JKS");
-            keyStore.load(is, config.mStorePass.toCharArray());
-            Key key = keyStore.getKey(config.mStoreAlias, config.mKeyPass.toCharArray());
-            String keyAlgorithm = key.getAlgorithm();
-            String signatureAlgorithm;
-            if (keyAlgorithm.equalsIgnoreCase("DSA")) {
-                signatureAlgorithm = "SHA1withDSA";
-            } else if (keyAlgorithm.equalsIgnoreCase("RSA")) {
-                signatureAlgorithm = "SHA1withRSA";
-            } else if (keyAlgorithm.equalsIgnoreCase("EC")) {
-                signatureAlgorithm = "SHA1withECDSA";
-            } else {
-                throw new RuntimeException("private key is not a DSA or "
-                        + "RSA key");
-            }
-            return signatureAlgorithm;
-        } finally {
-            IOHelper.closeQuietly(is);
-        }
-    }
-
     /**
+     * Sign the patch package with the RSA private key from the configured keystore.
+     * The Base64 signature of the whole package content is stored as the
+     * assets/package_signature.txt zip entry, no jarsigner v1 signature is applied.
+     * The signature survives the optional 7z repack because the digest is content based.
+     *
      * @param input  unsigned file input
      * @param output signed file output
-     * @throws IOException
-     * @throws InterruptedException
+     * @throws Exception
      */
     private void signApk(File input, File output) throws Exception {
         //sign apk
         if (config.mUseSignAPk) {
-            Logger.d("Signing apk: %s", output.getName());
-            String signatureAlgorithm = getSignatureAlgorithm();
-            Logger.d("Signing key algorithm is %s", signatureAlgorithm);
-
-            if (output.exists()) {
-                output.delete();
-            }
-            ArrayList<String> command = new ArrayList<>();
-            command.add("jarsigner");
-            // issue https://github.com/Tencent/tinker/issues/118
-            command.add("-sigalg");
-            command.add(signatureAlgorithm);
-            command.add("-digestalg");
-            command.add("SHA1");
-            command.add("-keystore");
-            command.add(config.mSignatureFile.getAbsolutePath());
-            command.add("-storepass");
-            command.add(config.mStorePass);
-            command.add("-keypass");
-            command.add(config.mKeyPass);
-            command.add("-signedjar");
-            command.add(output.getAbsolutePath());
-            command.add(input.getAbsolutePath());
-            command.add(config.mStoreAlias);
-
-            Process process = new ProcessBuilder(command).start();
-            process.waitFor();
-            process.destroy();
-            if (!output.exists()) {
-                throw new IOException("Can't Generate signed APK. Please check if your sign info is correct.");
-            }
+            Logger.d("Signing apk with SHA256withRSA: %s", output.getName());
+            final PrivateKey privateKey = RsaSignUtil.loadPrivateKey(
+                    config.mSignatureFile, config.mStorePass, config.mKeyPass, config.mStoreAlias);
+            RsaSignUtil.signApk(input, output, privateKey);
         }
     }
 

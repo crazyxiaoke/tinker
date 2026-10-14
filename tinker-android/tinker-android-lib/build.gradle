@@ -48,6 +48,59 @@ task buildTinkerSdk(type: Copy, dependsOn: [build]) {
     }
 }
 
+// Merge tinker-android-lib, tinker-android-loader and all the java-library dependencies
+// (commons, anno, anno-support, aosp-dexutils, bsdiff-util, tinker-ziputils) into one fat
+// aar, so the host app only needs to depend on a single local artifact.
+def sdkAllDir = "$buildDir/tinkerSdkAll"
+
+task extractSdkAllClasses(type: Copy) {
+    dependsOn 'assembleRelease', ':tinker-android:tinker-android-loader:assembleRelease'
+    from(zipTree("$buildDir/outputs/aar/tinker-android-lib-release.aar")) {
+        include 'classes.jar'
+        rename 'classes.jar', 'tinker-android-lib-classes.jar'
+    }
+    from(zipTree("${project(':tinker-android:tinker-android-loader').buildDir}/outputs/aar/tinker-android-loader-release.aar")) {
+        include 'classes.jar'
+        rename 'classes.jar', 'tinker-android-loader-classes.jar'
+    }
+    into "$sdkAllDir/jars"
+}
+
+task mergeSdkAllClasses(type: Zip, dependsOn: extractSdkAllClasses) {
+    dependsOn ':tinker-commons:jar',
+            ':tinker-android:tinker-android-anno:jar',
+            ':tinker-android:tinker-android-anno-support:jar',
+            ':third-party:aosp-dexutils:jar',
+            ':third-party:bsdiff-util:jar',
+            ':third-party:tinker-ziputils:jar'
+    archiveFileName = 'classes.jar'
+    destinationDirectory = file("$sdkAllDir/merged")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/**', 'TinkerAnnoApplication.tmpl'
+    from({
+        def jarFiles = fileTree(dir: "$sdkAllDir/jars").files.collect { zipTree(it) }
+        [':tinker-commons',
+         ':tinker-android:tinker-android-anno',
+         ':tinker-android:tinker-android-anno-support',
+         ':third-party:aosp-dexutils',
+         ':third-party:bsdiff-util',
+         ':third-party:tinker-ziputils'].each { jarFiles.add(zipTree(project(it).tasks.jar.outputs.files.singleFile)) }
+        jarFiles
+    })
+}
+
+task buildTinkerSdkAll(type: Zip, dependsOn: mergeSdkAllClasses) {
+    group = "tinker"
+    archiveFileName = "tinker-android-lib-${version}-all.aar"
+    destinationDirectory = rootProject.file("buildSdk/android")
+    from(zipTree("$buildDir/outputs/aar/tinker-android-lib-release.aar")) {
+        exclude 'classes.jar'
+    }
+    from("$sdkAllDir/merged") {
+        include 'classes.jar'
+    }
+}
+
 apply from: rootProject.file('gradle/PublishArtifact.gradle')
 
 

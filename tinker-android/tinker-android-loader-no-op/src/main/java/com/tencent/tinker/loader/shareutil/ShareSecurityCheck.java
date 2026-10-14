@@ -16,17 +16,13 @@
 
 package com.tencent.tinker.loader.shareutil;
 
-import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
 
 import com.tencent.tinker.loader.TinkerRuntimeException;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
-import java.security.cert.Certificate;
+import java.security.PublicKey;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.jar.JarEntry;
@@ -34,14 +30,19 @@ import java.util.jar.JarFile;
 
 /**
  * Created by zhangshaowen on 16/3/10.
+ *
+ * Patch packages are no longer required to be jarsigner-signed with the host app
+ * certificate. Instead the patch builder embeds an RSA signature of the whole package
+ * content (see {@link ShareRsaSignUtil#SIGNATURE_ENTRY_NAME}), which is verified here
+ * against the RSA public key asset bundled in the base apk.
  */
 public class ShareSecurityCheck {
-    private static final String TAG           = "Tinker.SecurityCheck";
+    private static final String TAG = "Tinker.SecurityCheck";
     /**
      * static to faster
-     * public key
+     * public key used to verify the patch package signature
      */
-    private static       String mPublicKeyMd5 = null;
+    private static PublicKey mPatchPublicKey = null;
 
     private final Context                 mContext;
     private final HashMap<String, String> metaContentMap;
@@ -51,7 +52,7 @@ public class ShareSecurityCheck {
         mContext = context;
         metaContentMap = new HashMap<>();
         packageProperties = new HashMap<>();
-        if (mPublicKeyMd5 == null) {
+        if (mPatchPublicKey == null) {
             init(mContext);
         }
     }
@@ -99,6 +100,10 @@ public class ShareSecurityCheck {
         if (!SharePatchFileUtil.isLegalFile(path)) {
             return false;
         }
+        //verify the whole package RSA signature first, before trusting any content inside
+        if (!ShareRsaSignUtil.verifyPatchSignature(path, mPatchPublicKey)) {
+            return false;
+        }
         JarFile jarFile = null;
         try {
             jarFile = new JarFile(path);
@@ -114,17 +119,12 @@ public class ShareSecurityCheck {
                 if (name.startsWith("META-INF/")) {
                     continue;
                 }
-                //for faster, only check the meta.txt files
+                //for faster, only load the meta.txt files
                 //we will check other files's md5 written in meta files
                 if (!name.endsWith(ShareConstants.META_SUFFIX)) {
                     continue;
                 }
                 metaContentMap.put(name, SharePatchFileUtil.loadDigestes(jarFile, jarEntry));
-                Certificate[] certs = jarEntry.getCertificates();
-
-                if (certs == null || !check(path, certs)) {
-                    return false;
-                }
             }
         } catch (Exception e) {
             throw new TinkerRuntimeException(
@@ -141,38 +141,14 @@ public class ShareSecurityCheck {
         return true;
     }
 
-
-    // verify the signature of the Apk
-    private boolean check(File path, Certificate[] certs) {
-        if (certs.length > 0) {
-            for (int i = certs.length - 1; i >= 0; i--) {
-                try {
-                    if (mPublicKeyMd5.equals(SharePatchFileUtil.getMD5(certs[i].getEncoded()))) {
-                        return true;
-                    }
-                } catch (Exception e) {
-                    ShareTinkerLog.e(TAG, path.getAbsolutePath(), e);
-                }
-            }
-        }
-        return false;
-    }
-
-    @SuppressLint("PackageManagerGetSignatures")
     private void init(Context context) {
-        ByteArrayInputStream stream = null;
         try {
-            PackageManager pm = context.getPackageManager();
-            String packageName = context.getPackageName();
-            PackageInfo packageInfo = pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
-            mPublicKeyMd5 = SharePatchFileUtil.getMD5(packageInfo.signatures[0].toByteArray());
-            if (mPublicKeyMd5 == null) {
-                throw new TinkerRuntimeException("get public key md5 is null");
+            mPatchPublicKey = ShareRsaSignUtil.loadPublicKeyFromBaseApk(context);
+            if (mPatchPublicKey == null) {
+                throw new TinkerRuntimeException("get patch public key is null");
             }
         } catch (Exception e) {
             throw new TinkerRuntimeException("ShareSecurityCheck init public key fail", e);
-        } finally {
-            SharePatchFileUtil.closeQuietly(stream);
         }
     }
 }
